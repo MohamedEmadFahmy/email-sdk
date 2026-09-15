@@ -8,6 +8,7 @@
     "email-sdk",
     "iterable",
     "mailgun",
+    "microsoft-graph",
     "postmark",
     "resend",
     "sendgrid",
@@ -70,6 +71,10 @@
       "import": "./dist/cloudflare.js",
       "require": "./dist/cloudflare.cjs",
       "default": "./dist/cloudflare.js"
+    },
+    "./graph": {
+      "types": "./dist/graph.d.ts",
+      "default": "./dist/graph.js"
     },
     "./unosend": {
       "types": "./dist/unosend.d.ts",
