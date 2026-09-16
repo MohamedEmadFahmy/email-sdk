@@ -224,6 +224,14 @@ export const providers = [
     summary: "Connect any existing SMTP server or self-hosted mail system.",
     logo: "",
   },
+  {
+    name: "Microsoft Graph",
+    key: "graph",
+    importPath: "@opencoredev/email-sdk/graph",
+    docs: "/docs/adapters/graph",
+    website: "https://learn.microsoft.com/en-us/graph/api/user-sendmail",
+    logo: "",
+  },
 ] as const;
 
 export type Provider = (typeof providers)[number];
