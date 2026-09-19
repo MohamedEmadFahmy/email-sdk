@@ -23,6 +23,7 @@ export type GraphClientSecretOptions = GraphSharedOptions & {
   clientId: string;
   clientSecret: string;
   tokenUrl?: string;
+  scope?: string;
   getAccessToken?: never;
 };
 
@@ -32,6 +33,7 @@ export type GraphAccessTokenOptions = GraphSharedOptions & {
   clientId?: never;
   clientSecret?: never;
   tokenUrl?: never;
+  scope?: never;
 };
 
 export type GraphAdapterOptions = GraphClientSecretOptions | GraphAccessTokenOptions;
@@ -112,18 +114,24 @@ function createTokenProvider(options: GraphAdapterOptions, fetcher: typeof fetch
   const body = new URLSearchParams({
     client_id: options.clientId,
     client_secret: options.clientSecret,
-    scope: "https://graph.microsoft.com/.default",
+    scope: options.scope ?? "https://graph.microsoft.com/.default",
     grant_type: "client_credentials",
   });
 
   let cached: { accessToken: string; refreshAt: number } | undefined;
+  let refreshing: Promise<NonNullable<typeof cached>> | undefined;
 
   return async function accessToken() {
-    if (!cached || cached.refreshAt <= Date.now()) {
-      cached = await requestAccessToken(fetcher, tokenUrl, body);
+    if (cached && cached.refreshAt > Date.now()) {
+      return cached.accessToken;
     }
 
-    return cached.accessToken;
+    refreshing ??= requestAccessToken(fetcher, tokenUrl, body)
+      .then((token) => (cached = token))
+      .finally(() => {
+        refreshing = undefined;
+      });
+    return (await refreshing).accessToken;
   };
 }
 

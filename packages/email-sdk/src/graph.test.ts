@@ -332,6 +332,82 @@ describe("graph payloads", () => {
 });
 
 describe("graph authentication", () => {
+  test("shares token acquisition and expired-token refresh across concurrent sends", async () => {
+    let tokenRequests = 0;
+    let release: ((response: Response) => void) | undefined;
+    const adapter = graph({
+      tenantId,
+      clientId: "client-id",
+      clientSecret: "client-secret",
+      user,
+      fetch: (async (url) => {
+        if (String(url) === tokenUrl) {
+          tokenRequests++;
+          return await new Promise<Response>((resolve) => { release = resolve; });
+        }
+        return new Response(null, { status: 202 });
+      }) as typeof fetch,
+    });
+
+    for (const round of [1, 2]) {
+      const sends = Promise.all(Array.from({ length: 5 }, () => adapter.send(message, context)));
+      expect(tokenRequests).toBe(round);
+      // A short-lived token is already inside the refresh window on the next round.
+      release!(Response.json({ access_token: `token-${round}`, expires_in: 30 }));
+      await sends;
+    }
+  });
+
+  test("clears a failed shared refresh so later sends can recover", async () => {
+    let tokenRequests = 0;
+    const adapter = graph({
+      tenantId,
+      clientId: "client-id",
+      clientSecret: "client-secret",
+      user,
+      fetch: (async (url) => {
+        if (String(url) === tokenUrl) {
+          tokenRequests++;
+          if (tokenRequests === 1) return new Response(null, { status: 503 });
+          return Response.json({ access_token: "recovered", expires_in: 3600 });
+        }
+        return new Response(null, { status: 202 });
+      }) as typeof fetch,
+    });
+
+    const failed = await Promise.allSettled([
+      adapter.send(message, context), adapter.send(message, context),
+    ]);
+    expect(failed.map((result) => result.status)).toEqual(["rejected", "rejected"]);
+    expect(tokenRequests).toBe(1);
+    await adapter.send(message, context);
+    expect(tokenRequests).toBe(2);
+  });
+
+  test("uses the configured national-cloud token endpoint and scope", async () => {
+    const calls: GraphCall[] = [];
+    const tokenUrl = `https://login.microsoftonline.us/${tenantId}/oauth2/v2.0/token`;
+    const adapter = graph({
+      tenantId,
+      clientId: "client-id",
+      clientSecret: "client-secret",
+      user,
+      baseUrl: "https://graph.microsoft.us/v1.0",
+      tokenUrl,
+      scope: "https://graph.microsoft.us/.default",
+      fetch: (async (url, init) => {
+        calls.push({ url: String(url), headers: new Headers(init?.headers), body: String(init?.body) });
+        return String(url) === tokenUrl
+          ? Response.json({ access_token: "government-token", expires_in: 3600 })
+          : new Response(null, { status: 202 });
+      }) as typeof fetch,
+    });
+    await adapter.send(message, context);
+    expect(calls[0]?.url).toBe(tokenUrl);
+    expect(calls[0]?.body).toContain("scope=https%3A%2F%2Fgraph.microsoft.us%2F.default");
+    expect(calls[1]?.url).toBe(`https://graph.microsoft.us/v1.0/users/${user}/sendMail`);
+  });
+
   test("exchanges client credentials before sending", async () => {
     const capture = graphCapture();
 
