@@ -74,6 +74,11 @@ export const email = createEmailClient({
       type: "string",
       default: '"https://graph.microsoft.com/.default"',
     },
+    tokenTimeoutMs: {
+      description: "Maximum time to wait for the built-in client-credentials token request, including its response body.",
+      type: "number",
+      default: "30000",
+    },
     saveToSentItems: {
       description: "Store a copy in the sender's Sent Items folder.",
       type: "boolean",

@@ -221,6 +221,21 @@ describe("email-sdk CLI", () => {
     }
   });
 
+  test("Graph doctor reports missing configuration as JSON", async () => {
+    const result = await runCli(["doctor", "--adapter", "graph", "--live", "--json"], {
+      MS_GRAPH_TENANT_ID: "",
+      MS_GRAPH_CLIENT_ID: "",
+      MS_GRAPH_CLIENT_SECRET: "",
+      MS_GRAPH_USER: "",
+    });
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toBe("");
+    const body = JSON.parse(result.stdout);
+    expect(body.ok).toBe(false);
+    expect(body.checks.configuration.status).toBe("failed");
+    expect(body.checks.authentication.status).toBe("blocked");
+  });
+
   test("Graph doctor uses secret flags and national-cloud OAuth options without leaking them", async () => {
     const requests: string[] = [];
     const server = Bun.serve({

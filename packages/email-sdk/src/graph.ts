@@ -24,11 +24,13 @@ export type GraphClientSecretOptions = GraphSharedOptions & {
   clientSecret: string;
   tokenUrl?: string;
   scope?: string;
+  tokenTimeoutMs?: number;
   getAccessToken?: never;
 };
 
 export type GraphAccessTokenOptions = GraphSharedOptions & {
   getAccessToken: () => string | Promise<string>;
+  tokenTimeoutMs?: never;
   tenantId?: never;
   clientId?: never;
   clientSecret?: never;
@@ -40,6 +42,13 @@ export type GraphAdapterOptions = GraphClientSecretOptions | GraphAccessTokenOpt
 
 const DEFAULT_BASE_URL = "https://graph.microsoft.com/v1.0";
 const TOKEN_REFRESH_SKEW_MS = 60_000;
+const DEFAULT_TOKEN_TIMEOUT_MS = 30_000;
+const MAX_TIMER_DELAY_MS = 2_147_483_647;
+
+type TokenProvider = {
+  get: () => string | Promise<string>;
+  invalidate: (token: string) => boolean;
+};
 
 export function graph(options: GraphAdapterOptions): EmailAdapter<"graph", { baseUrl: string }> {
   const baseUrl = options.baseUrl ?? DEFAULT_BASE_URL;
@@ -53,27 +62,43 @@ export function graph(options: GraphAdapterOptions): EmailAdapter<"graph", { bas
     async send(message, context) {
       validateBuiltInAdapter("graph", message);
 
-      const token = await resolveAccessToken(accessToken, context.signal);
-      const response = await fetcher(
-        `${baseUrl}/users/${encodeURIComponent(options.user)}/sendMail`,
-        {
-          method: "POST",
-          signal: context.signal,
-          headers: {
-            Authorization: `Bearer ${token}`,
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify(await toGraphPayload(message, options.saveToSentItems)),
-        },
+      let token = await resolveAccessToken(accessToken, context.signal);
+      const payload = JSON.stringify(await toGraphPayload(message, options.saveToSentItems));
+      let response = await sendGraphMessage(
+        fetcher,
+        baseUrl,
+        options.user,
+        token,
+        payload,
+        context.signal,
       );
 
-      if (!response.ok) {
+      if (response.status === 401 && accessToken.invalidate(token)) {
+        void response.body?.cancel().catch(() => {});
+        token = await resolveAccessToken(accessToken, context.signal);
+        response = await sendGraphMessage(
+          fetcher,
+          baseUrl,
+          options.user,
+          token,
+          payload,
+          context.signal,
+        );
+        if (response.status === 401) accessToken.invalidate(token);
+      }
+
+      if (!response.ok || response.status !== 202) {
         const body = await readErrorBody(response);
         throw new EmailAdapterError(graphErrorMessage(response.status, body), {
           adapter: "graph",
           status: response.status,
           retryable: isRetryableStatus(response.status),
-          delivery: response.status < 500 ? "not_sent" : "unknown",
+          delivery:
+            response.status >= 200 && response.status < 300
+              ? "unknown"
+              : response.status < 500
+                ? "not_sent"
+                : "unknown",
         });
       }
 
@@ -84,10 +109,26 @@ export function graph(options: GraphAdapterOptions): EmailAdapter<"graph", { bas
   };
 }
 
-async function resolveAccessToken(getAccessToken: () => string | Promise<string>, signal?: AbortSignal) {
+async function sendGraphMessage(
+  fetcher: typeof fetch,
+  baseUrl: string,
+  user: string,
+  token: string,
+  payload: string,
+  signal?: AbortSignal,
+) {
+  return fetcher(`${baseUrl}/users/${encodeURIComponent(user)}/sendMail`, {
+    method: "POST",
+    signal,
+    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+    body: payload,
+  });
+}
+
+async function resolveAccessToken(provider: TokenProvider, signal?: AbortSignal) {
   try {
     if (signal?.aborted) throw new EmailAbortError(signal.reason);
-    const token = getAccessToken();
+    const token = provider.get();
     if (!signal) return await token;
 
     // Cancel this sender's wait, not the refresh shared with other senders.
@@ -129,7 +170,7 @@ async function resolveAccessToken(getAccessToken: () => string | Promise<string>
 
 function createTokenProvider(options: GraphAdapterOptions, fetcher: typeof fetch) {
   if (options.getAccessToken) {
-    return options.getAccessToken;
+    return { get: options.getAccessToken, invalidate: () => false };
   }
 
   const tokenUrl =
@@ -143,28 +184,67 @@ function createTokenProvider(options: GraphAdapterOptions, fetcher: typeof fetch
 
   let cached: { accessToken: string; refreshAt: number } | undefined;
   let refreshing: Promise<NonNullable<typeof cached>> | undefined;
+  const tokenTimeoutMs = options.tokenTimeoutMs ?? DEFAULT_TOKEN_TIMEOUT_MS;
 
-  return async function accessToken() {
-    if (cached && cached.refreshAt > Date.now()) {
-      return cached.accessToken;
-    }
+  if (
+    !Number.isFinite(tokenTimeoutMs) ||
+    tokenTimeoutMs <= 0 ||
+    tokenTimeoutMs > MAX_TIMER_DELAY_MS
+  ) {
+    throw new Error(
+      "graph tokenTimeoutMs must be finite, positive, and no greater than 2147483647.",
+    );
+  }
 
-    refreshing ??= requestAccessToken(fetcher, tokenUrl, body)
-      .then((token) => (cached = token))
-      .finally(() => {
-        refreshing = undefined;
-      });
-    return (await refreshing).accessToken;
+  return {
+    get: async function accessToken() {
+      if (cached && cached.refreshAt > Date.now()) {
+        return cached.accessToken;
+      }
+
+      refreshing ??= requestAccessToken(fetcher, tokenUrl, body, tokenTimeoutMs)
+        .then((token) => (cached = token))
+        .finally(() => {
+          refreshing = undefined;
+        });
+      return (await refreshing).accessToken;
+    },
+    invalidate(token: string) {
+      if (cached?.accessToken === token) cached = undefined;
+      return true;
+    },
   };
 }
 
-async function requestAccessToken(fetcher: typeof fetch, tokenUrl: string, body: URLSearchParams) {
-  const response = await fetcher(tokenUrl, {
+async function requestAccessToken(
+  fetcher: typeof fetch,
+  tokenUrl: string,
+  body: URLSearchParams,
+  timeoutMs: number,
+) {
+  const controller = new AbortController();
+  const request = fetcher(tokenUrl, {
     method: "POST",
+    signal: controller.signal,
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body,
+  }).then(async (response) => ({ response, body: await readErrorBody(response) }));
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      reject(
+        new EmailAdapterError("graph token acquisition timed out.", {
+          adapter: "graph",
+          retryable: true,
+          delivery: "not_sent",
+        }),
+      );
+      controller.abort();
+    }, timeoutMs);
   });
-  const responseBody = await readErrorBody(response);
+  const { response, body: responseBody } = await Promise.race([request, timeout]).finally(() => {
+    if (timer) clearTimeout(timer);
+  });
 
   if (!response.ok) {
     throw new EmailAdapterError(graphErrorMessage(response.status, responseBody), {
