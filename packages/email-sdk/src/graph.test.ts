@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 
 import { createEmailClient } from "./core.js";
-import { EmailAdapterError, EmailRouteError, EmailValidationError } from "./errors.js";
+import { EmailAbortError, EmailAdapterError, EmailRouteError, EmailValidationError } from "./errors.js";
 import { graph } from "./graph.js";
 import type { EmailAdapterContext, EmailMessage } from "./types.js";
 
@@ -332,6 +332,52 @@ describe("graph payloads", () => {
 });
 
 describe("graph authentication", () => {
+  test("aborts a token wait without cancelling another sender's shared refresh", async () => {
+    let tokenRequests = 0;
+    let sends = 0;
+    let release!: (response: Response) => void;
+    const adapter = graphAdapter((async (url) => {
+      if (String(url) === tokenUrl) {
+        tokenRequests++;
+        return await new Promise<Response>((resolve) => { release = resolve; });
+      }
+      sends++;
+      return new Response(null, { status: 202 });
+    }) as typeof fetch);
+    const controller = new AbortController();
+    const cancelled = adapter.send(message, { ...context, signal: controller.signal });
+    const other = adapter.send(message, context);
+    controller.abort();
+    await expect(cancelled).rejects.toBeInstanceOf(EmailAbortError);
+    expect(tokenRequests).toBe(1);
+    expect(sends).toBe(0);
+    release(Response.json({ access_token: "shared", expires_in: 3600 }));
+    await other;
+    expect(sends).toBe(1);
+  });
+
+  test("does not acquire a token for an already-aborted send", async () => {
+    const capture = graphCapture();
+    const controller = new AbortController();
+    controller.abort();
+    await expect(graphAdapter(capture.fetch).send(message, {
+      ...context, signal: controller.signal,
+    })).rejects.toBeInstanceOf(EmailAbortError);
+    expect(capture.calls).toHaveLength(0);
+  });
+
+  test("aborts while an injected token provider is pending", async () => {
+    const controller = new AbortController();
+    const adapter = graph({
+      user,
+      getAccessToken: () => new Promise<string>(() => {}),
+      fetch: (() => { throw new Error("An aborted send must not reach Graph"); }) as typeof fetch,
+    });
+    const pending = adapter.send(message, { ...context, signal: controller.signal });
+    controller.abort();
+    await expect(pending).rejects.toBeInstanceOf(EmailAbortError);
+  });
+
   test("shares token acquisition and expired-token refresh across concurrent sends", async () => {
     let tokenRequests = 0;
     let release: ((response: Response) => void) | undefined;

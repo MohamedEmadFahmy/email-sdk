@@ -167,6 +167,11 @@ Drop `--dry-run` for one real send. Only Microsoft can prove the app registratio
 
 ## National clouds and Convex
 
+Add `--live` to `doctor --adapter graph` for a non-sending client-credentials check.
+It verifies authentication, not mailbox access, `Mail.Send` consent, or delivery.
+The CLI accepts `--token-url` / `MS_GRAPH_TOKEN_URL` and `--scope` / `MS_GRAPH_SCOPE`
+for national-cloud authentication, alongside `--base-url` / `MS_GRAPH_BASE_URL` for sending.
+
 For a national-cloud SDK client, configure `baseUrl`, `tokenUrl`, and `scope` together.
 For example, US Government L4 uses `https://graph.microsoft.us/v1.0`,
 `https://login.microsoftonline.us/<tenant-id>/oauth2/v2.0/token`, and

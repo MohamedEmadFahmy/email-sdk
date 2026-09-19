@@ -1,4 +1,4 @@
-import { EmailAdapterError } from "./errors.js";
+import { EmailAbortError, EmailAdapterError } from "./errors.js";
 import { base64Attachments, commonHeadersArray, emailParts } from "./payloads.js";
 import type { EmailAdapter, EmailMessage } from "./types.js";
 import {
@@ -53,7 +53,7 @@ export function graph(options: GraphAdapterOptions): EmailAdapter<"graph", { bas
     async send(message, context) {
       validateBuiltInAdapter("graph", message);
 
-      const token = await resolveAccessToken(accessToken);
+      const token = await resolveAccessToken(accessToken, context.signal);
       const response = await fetcher(
         `${baseUrl}/users/${encodeURIComponent(options.user)}/sendMail`,
         {
@@ -84,10 +84,33 @@ export function graph(options: GraphAdapterOptions): EmailAdapter<"graph", { bas
   };
 }
 
-async function resolveAccessToken(getAccessToken: () => string | Promise<string>) {
+async function resolveAccessToken(getAccessToken: () => string | Promise<string>, signal?: AbortSignal) {
   try {
-    return await getAccessToken();
+    if (signal?.aborted) throw new EmailAbortError(signal.reason);
+    const token = getAccessToken();
+    if (!signal) return await token;
+
+    // Cancel this sender's wait, not the refresh shared with other senders.
+    return await new Promise<string>((resolve, reject) => {
+      const abort = () => {
+        signal.removeEventListener("abort", abort);
+        reject(new EmailAbortError(signal.reason));
+      };
+      signal.addEventListener("abort", abort, { once: true });
+      Promise.resolve(token).then(
+        (value) => {
+          signal.removeEventListener("abort", abort);
+          resolve(value);
+        },
+        (error) => {
+          signal.removeEventListener("abort", abort);
+          reject(error);
+        },
+      );
+      if (signal.aborted) abort();
+    });
   } catch (error) {
+    if (error instanceof EmailAbortError) throw error;
     const normalized = toProviderError("graph", error);
 
     if (normalized instanceof EmailAdapterError && normalized.delivery !== "not_sent") {

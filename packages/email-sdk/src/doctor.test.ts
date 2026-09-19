@@ -69,6 +69,68 @@ describe("shared live gate wiring", () => {
   });
 });
 
+describe("Graph live probe", () => {
+  test("checks client credentials without sending mail and honors national-cloud options", async () => {
+    const requests: Array<{ url: string; body: string }> = [];
+    const result = await runDoctor({
+      adapter: "graph",
+      configured: true,
+      live: true,
+      credential: "private-client-secret",
+      tenantId: "private-tenant",
+      clientId: "private-client",
+      tokenUrl: "http://127.0.0.1/token",
+      scope: "https://graph.microsoft.us/.default",
+      fetch: async (url, init) => {
+        requests.push({ url, body: String(init.body) });
+        return json({ access_token: "private-token" });
+      },
+    });
+    expect(result.checks.authentication.status).toBe("passed");
+    expect(result.checks.sender.status).toBe("not_requested");
+    expect(requests).toEqual([
+      {
+        url: "http://127.0.0.1/token",
+        body: "client_id=private-client&client_secret=private-client-secret&scope=https%3A%2F%2Fgraph.microsoft.us%2F.default&grant_type=client_credentials",
+      },
+    ]);
+  });
+
+  test("times out a Graph token request that ignores its abort signal", async () => {
+    const result = await runDoctor({
+      adapter: "graph",
+      configured: true,
+      live: true,
+      credential: "private-client-secret",
+      tenantId: "private-tenant",
+      clientId: "private-client",
+      tokenUrl: "http://127.0.0.1/token",
+      timeoutMs: 5,
+      fetch: async () => new Promise<Response>(() => {}),
+    });
+    expect(result.checks.authentication.status).toBe("timeout");
+  });
+
+  test("bounds an oversized Graph token response", async () => {
+    const result = await runDoctor({
+      adapter: "graph",
+      configured: true,
+      live: true,
+      credential: "private-client-secret",
+      tenantId: "private-tenant",
+      clientId: "private-client",
+      tokenUrl: "http://127.0.0.1/token",
+      fetch: async () =>
+        new Response(JSON.stringify({ access_token: "x".repeat(1_100_000) }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+    });
+    expect(result.checks.authentication.status).toBe("inconclusive");
+    expect(result.ok).toBe(false);
+  });
+});
+
 describe("doctor safe probes", () => {
   test("default checks configuration without provider requests", async () => {
     let calls = 0;

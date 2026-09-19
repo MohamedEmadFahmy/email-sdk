@@ -221,6 +221,38 @@ describe("email-sdk CLI", () => {
     }
   });
 
+  test("Graph doctor uses secret flags and national-cloud OAuth options without leaking them", async () => {
+    const requests: string[] = [];
+    const server = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      async fetch(request) {
+        requests.push(await request.text());
+        return Response.json({ access_token: "private-access-token" });
+      },
+    });
+    try {
+      const result = await runCli([
+        "doctor", "--adapter", "graph", "--live", "--json",
+        "--tenant-id", "tenant", "--client-id", "client", "--user", "mailbox@example.com",
+        "--client-secret", "flag-private-secret", "--token-url", server.url.href,
+        "--scope", "https://graph.microsoft.us/.default",
+      ], { MS_GRAPH_CLIENT_SECRET: "env-private-secret" });
+      expect(result.exitCode).toBe(0);
+      expect(result.stderr).toBe("");
+      expect(requests).toHaveLength(1);
+      const form = new URLSearchParams(requests[0]);
+      expect(form.get("client_secret")).toBe("flag-private-secret");
+      expect(form.get("scope")).toBe("https://graph.microsoft.us/.default");
+      expect(JSON.parse(result.stdout).checks.authentication.status).toBe("passed");
+      for (const secret of ["flag-private-secret", "env-private-secret", "private-access-token"]) {
+        expect(result.stdout).not.toContain(secret);
+      }
+    } finally {
+      server.stop(true);
+    }
+  });
+
   test.each([
     [401, "invalid_credentials"],
     [403, "insufficient_permissions"],
