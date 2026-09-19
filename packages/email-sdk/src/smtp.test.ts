@@ -3,6 +3,7 @@ import net from "node:net";
 
 import { EmailValidationError } from "./errors.js";
 import { smtp } from "./smtp.js";
+import { isRetryableSmtpError, smtpDeliveryState } from "./smtp-errors.js";
 import type { EmailMessage } from "./types.js";
 
 const baseMessage: EmailMessage = {
@@ -11,6 +12,89 @@ const baseMessage: EmailMessage = {
   subject: "Hello",
   text: "Hi there",
 };
+
+describe("smtp error classification", () => {
+  test.each([
+    ["ECONNECTION", true],
+    ["ETIMEDOUT", true],
+    ["ESOCKET", true],
+    ["EDNS", true],
+    ["ETLS", true],
+    ["EMAXLIMIT", true],
+    ["EPROTOCOL", false],
+  ])("classifies %s retryability as %s", (code, retryable) => {
+    expect(isRetryableSmtpError({ code })).toBe(retryable);
+  });
+
+  test.each([
+    ["ECONNECTION", "unknown"],
+    ["ETIMEDOUT", "unknown"],
+    ["ESOCKET", "unknown"],
+    ["EDNS", "not_sent"],
+    ["ETLS", "not_sent"],
+    ["EENVELOPE", "not_sent"],
+    ["EMESSAGE", "not_sent"],
+    ["EAUTH", "not_sent"],
+    ["ENOAUTH", "not_sent"],
+    ["EOAUTH2", "not_sent"],
+    ["ECONFIG", "not_sent"],
+    ["EPROXY", "not_sent"],
+    ["EREQUIRETLS", "not_sent"],
+    ["EPROTOCOL", "unknown"],
+  ])("classifies %s delivery state as %s", (code, delivery) => {
+    expect(smtpDeliveryState({ code })).toBe(delivery);
+  });
+
+  test.each([
+    ["ETLS", "certificate has expired"],
+    ["ESOCKET", "unable to verify the first certificate"],
+    ["ETLS", "self-signed certificate"],
+    ["ESOCKET", "Hostname/IP does not match certificate's altnames"],
+    ["ETLS", "Error initiating TLS - certificate revoked"],
+    ["ETLS", "invalid CA certificate"],
+    ["ETLS", "certificate signature failure"],
+    ["ETLS", "CA certificate key too small"],
+    ["ETLS", "CA is untrusted"],
+    ["ESOCKET", "CA is untrusted"],
+    ["ETLS", "CA key too small"],
+    ["ESOCKET", "CA key too small"],
+  ])("does not retry %s certificate failures", (code, message) => {
+    const error = { code, message };
+    expect(isRetryableSmtpError(error)).toBe(false);
+    expect(smtpDeliveryState(error)).toBe("not_sent");
+  });
+
+  test.each([
+    ["INVALID_CA", "TLS handshake failed"],
+    ["CERT_SIGNATURE_FAILURE", "TLS handshake failed"],
+    ["ERR_SSL_CA_KEY_TOO_SMALL", "TLS handshake failed"],
+  ])("classifies certificate error code %s as permanent", (code, message) => {
+    const error = { code, message };
+    expect(isRetryableSmtpError(error)).toBe(false);
+    expect(smtpDeliveryState(error)).toBe("not_sent");
+  });
+
+  test("keeps transient TLS failures not sent", () => {
+    expect(smtpDeliveryState({ code: "ETLS", message: "TLS negotiation failed" })).toBe(
+      "not_sent",
+    );
+    expect(isRetryableSmtpError({ code: "ETLS", message: "TLS negotiation failed" })).toBe(true);
+  });
+
+  test.each([
+    [{ responseCode: 450 }, true],
+    [{ responseCode: 550 }, false],
+  ])("uses SMTP response class for retryability", (error, retryable) => {
+    expect(isRetryableSmtpError(error)).toBe(retryable);
+    expect(smtpDeliveryState(error)).toBe("not_sent");
+  });
+
+  test("preserves unknown delivery for ambiguous protocol failures", () => {
+    const error = { code: "EPROTOCOL", message: "connection closed" };
+    expect(isRetryableSmtpError(error)).toBe(false);
+    expect(smtpDeliveryState(error)).toBe("unknown");
+  });
+});
 
 function send(message: EmailMessage) {
   // host points at an unroutable port; validation must reject before any connect.
@@ -70,6 +154,54 @@ async function captureSmtpData(message: EmailMessage) {
 
   return { commands, data: captured, result: result! };
 }
+
+// Runs a minimal in-process SMTP server that replies to RCPT TO with a fixed
+// scripted response line, so tests can force a specific SMTP reply code.
+async function sendWithRcptReply(reply: string) {
+  const server = net.createServer((socket) => {
+    socket.setEncoding("utf8");
+    socket.write("220 test.local\r\n");
+    socket.on("data", (chunk: string) => {
+      const command = chunk.trim().toUpperCase();
+
+      if (command.startsWith("EHLO")) {
+        socket.write("250 test.local\r\n");
+      } else if (command.startsWith("MAIL")) {
+        socket.write("250 ok\r\n");
+      } else if (command.startsWith("RCPT")) {
+        socket.write(`${reply}\r\n`);
+      } else if (command === "QUIT") {
+        socket.write("221 bye\r\n");
+        socket.end();
+      } else {
+        socket.write("250 ok\r\n");
+      }
+    });
+  });
+
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const { port } = server.address() as net.AddressInfo;
+
+  try {
+    return await smtp({ host: "127.0.0.1", port }).send(baseMessage, { attempt: 1 });
+  } finally {
+    server.close();
+  }
+}
+
+describe("smtp error retryability", () => {
+  test("a permanent SMTP reply (5xx) is not retryable", async () => {
+    await expect(sendWithRcptReply("550 5.1.1 User unknown")).rejects.toMatchObject({
+      retryable: false,
+    });
+  });
+
+  test("a transient SMTP reply (4xx) is retryable", async () => {
+    await expect(sendWithRcptReply("450 4.2.1 Mailbox busy")).rejects.toMatchObject({
+      retryable: true,
+    });
+  });
+});
 
 describe("smtp injection guards", () => {
   test("rejects CRLF injected into the envelope address", async () => {

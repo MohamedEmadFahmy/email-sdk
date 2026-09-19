@@ -2,6 +2,7 @@ import nodemailer from "nodemailer";
 import type { SendMailOptions, SentMessageInfo } from "nodemailer";
 
 import { EmailAbortError, EmailAdapterError } from "./errors.js";
+import { isRetryableSmtpError, smtpDeliveryState } from "./smtp-errors.js";
 import type { EmailAdapter, EmailAttachment, EmailMessage } from "./types.js";
 import {
   BUILT_IN_ADAPTER_CAPABILITIES,
@@ -88,7 +89,8 @@ export function smtp<const Name extends string = "smtp">(
         if (error instanceof EmailAbortError) throw error;
         throw new EmailAdapterError(error instanceof Error ? error.message : "SMTP send failed.", {
           adapter: name,
-          retryable: true,
+          retryable: isRetryableSmtpError(error),
+          delivery: smtpDeliveryState(error),
           cause: error,
         });
       } finally {
@@ -97,7 +99,6 @@ export function smtp<const Name extends string = "smtp">(
     },
   };
 }
-
 function parseQueueIdentifier(response: string | undefined) {
   return response?.match(/\bqueued\s+as\s+([^\s]+)/i)?.[1];
 }
