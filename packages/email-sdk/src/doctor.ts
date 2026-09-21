@@ -25,11 +25,16 @@ export type DoctorOptions = {
   live?: boolean;
   from?: string;
   baseUrl?: string;
+  tenantId?: string;
+  clientId?: string;
+  tokenUrl?: string;
+  scope?: string;
   fetch?: (url: string, init: RequestInit) => Promise<Response>;
   timeoutMs?: number;
 };
 
 const probes = {
+  graph: { base: "", path: "" },
   resend: { base: "https://api.resend.com", path: "/domains?limit=100" },
   sequenzy: { base: "https://api.sequenzy.com/api/v1", path: "/account" },
   primitive: { base: "https://api.primitive.dev/v1", path: "/account" },
@@ -114,7 +119,7 @@ export async function runDoctor(options: DoctorOptions): Promise<DoctorResult> {
   }
   const adapter = options.adapter as ProbeName;
   const probe = probes[adapter];
-  const base = safeBase(options.baseUrl, probe.base);
+  const base = adapter === "graph" ? "graph" : safeBase(options.baseUrl, probe.base);
   if (!base) {
     checks.configuration = check(
       "failed",
@@ -144,6 +149,66 @@ export async function runDoctor(options: DoctorOptions): Promise<DoctorResult> {
       reject(new Error("timeout"));
     }, timeout);
   });
+  if (adapter === "graph") {
+    const tokenUrl = graphTokenUrl(options.tokenUrl, options.tenantId);
+    if (!tokenUrl || !options.tenantId?.trim() || !options.clientId?.trim()) {
+      checks.configuration = check(
+        "failed",
+        "Provide valid Graph tenant, client, and token endpoint configuration before requesting a live check.",
+      );
+      clearTimeout(timer);
+      return finish();
+    }
+    const work = async () => {
+      let response: Response;
+      try {
+        response = await (options.fetch ?? fetch)(tokenUrl, {
+          method: "POST",
+          headers: { "Content-Type": "application/x-www-form-urlencoded" },
+          body: new URLSearchParams({
+            client_id: options.clientId!,
+            client_secret: options.credential!,
+            scope: options.scope ?? "https://graph.microsoft.com/.default",
+            grant_type: "client_credentials",
+          }),
+          redirect: "error",
+          signal: controller.signal,
+        });
+      } catch {
+        throw new TransportFailure();
+      }
+      controller.signal.throwIfAborted();
+      if (response.status !== 200) {
+        void response.body?.cancel().catch(() => {});
+        checks.authentication =
+          response.status === 401 || response.status === 400
+            ? check("invalid_credentials", "Graph rejected the client credentials. Verify the tenant, client ID, secret, and application permissions.")
+            : response.status === 429
+              ? check("rate_limited", "Graph rate limited the authentication check (HTTP 429). Retry later; this does not prove the credentials are invalid.")
+              : uncertain();
+        return;
+      }
+      const body = await boundedJson(response, controller.signal);
+      checks.authentication =
+        isRecord(body) && typeof body.access_token === "string" && body.access_token.length > 0
+          ? authenticated()
+          : uncertain();
+    };
+    try {
+      await Promise.race([work(), deadline]);
+    } catch (error) {
+      checks.authentication = controller.signal.aborted
+        ? check("timeout", "The live check timed out. Check connectivity and provider status, then retry.")
+        : error instanceof TransportFailure
+          ? check("network_failure", "The live check failed at the network or redirect transport layer. Check connectivity, TLS, proxy settings, and the fixed token URL; redirects are not followed.")
+          : uncertain();
+    } finally {
+      clearTimeout(timer);
+      controller.abort();
+    }
+    if (domain) checks.sender = check("unsupported", "Graph sender readiness is not checked by this non-sending probe.");
+    return finish();
+  }
   const request = async (path: string) => {
     const headers: Record<string, string> = { Accept: "application/json" };
     if (adapter === "lettermint") headers["x-lettermint-token"] = options.credential!;
@@ -318,6 +383,22 @@ function safeBase(value: string | undefined, expected: string): string | undefin
     /* Invalid URLs are configuration failures. */
   }
   return undefined;
+}
+
+function graphTokenUrl(value: string | undefined, tenantId: string | undefined): string | undefined {
+  const fallback = tenantId?.trim()
+    ? `https://login.microsoftonline.com/${encodeURIComponent(tenantId.trim())}/oauth2/v2.0/token`
+    : undefined;
+  if (value === undefined) return fallback;
+  try {
+    const url = new URL(value);
+    if (url.username || url.password || url.search || url.hash) return;
+    if (["127.0.0.1", "[::1]"].includes(url.hostname) && ["http:", "https:"].includes(url.protocol)) return url.href;
+    if (url.protocol !== "https:" || !["login.microsoftonline.com", "login.microsoftonline.us", "login.chinacloudapi.cn", "login.microsoftonline.de"].includes(url.hostname)) return;
+    return url.href;
+  } catch {
+    return;
+  }
 }
 
 function senderDomain(value: string): string | undefined {

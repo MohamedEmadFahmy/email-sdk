@@ -60,6 +60,14 @@ export const ADAPTER_SUPPORT_ENTRIES = [
     limits: ["Accepts at most 50 combined to, cc, and bcc recipients.", "Recipient display names are not supported; plain strings and {email} objects are valid.", "Accepts one reply-to address."],
   },
   {
+    id: "graph",
+    label: "Microsoft Graph",
+    setupHref: "/docs/adapters/graph",
+    fields: { cc: true, bcc: true, replyTo: true, headers: true, attachments: true },
+    capabilities: { repeatedHeaders: true, idempotency: "none", scheduling: false, personalized: "expanded" },
+    limits: ["Only x- prefixed custom headers are supported.", "Accepts at most 5 custom headers per message.", "Accepts at most 1,000 combined to, cc, and bcc recipients."],
+  },
+  {
     id: "unosend",
     label: "Unosend",
     setupHref: "/docs/adapters/unosend",
@@ -218,7 +226,7 @@ export const ADAPTER_SUPPORT_ENTRIES = [
   },
 ] as const satisfies readonly AdapterSupportEntry[];
 
-export const ADAPTER_SUPPORT_TOTAL_LABEL = "23 provider APIs plus SMTP, 24 adapters total";
+export const ADAPTER_SUPPORT_TOTAL_LABEL = "24 provider APIs plus SMTP, 25 adapters total";
 
 export function getUnsupportedFields(entry: AdapterSupportEntry): AdapterSupportField[] {
   return ADAPTER_SUPPORT_FIELDS.filter((field) => entry.fields[field] !== true);

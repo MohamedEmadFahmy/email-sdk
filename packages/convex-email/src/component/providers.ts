@@ -9,6 +9,7 @@ import {
 } from "@opencoredev/email-sdk";
 import { brevo } from "@opencoredev/email-sdk/brevo";
 import { cloudflare } from "@opencoredev/email-sdk/cloudflare";
+import { graph } from "@opencoredev/email-sdk/graph";
 import { iterable } from "@opencoredev/email-sdk/iterable";
 import { jetemail } from "@opencoredev/email-sdk/jetemail";
 import { lettermint } from "@opencoredev/email-sdk/lettermint";
@@ -38,8 +39,10 @@ import { zeptomail } from "@opencoredev/email-sdk/zeptomail";
 import { env, type Env } from "./_generated/server.js";
 import {
   adapterFields,
+  CONVEX_EMAIL_ADAPTERS,
   isDeclaredEnvVar,
   type ConvexAdapterField,
+  type ConvexAdapterFields,
   type ConvexEmailEnvVar,
 } from "../shared/adapters.js";
 import type {
@@ -149,6 +152,7 @@ const ADAPTER_FACTORIES: Record<ConvexEmailAdapterKind, AdapterFactory> = {
         resolved.user && resolved.pass ? { user: resolved.user, pass: resolved.pass } : undefined,
     });
   },
+  graph: fromOptions(graph),
   sparkpost: fromOptions(sparkpost),
   unosend: fromOptions(unosend),
   zeptomail: fromOptions(zeptomail),
@@ -211,6 +215,11 @@ function envNameFor(kind: string, values: Record<string, unknown>, key: string, 
     return fallback;
   }
 
+  // Graph URL and identity fields must not turn unrelated secrets into request URLs.
+  if (kind === "graph" && override !== fallback) {
+    throw new Error(`Graph ${key}Env must use ${fallback}; map custom values in app.use(convexEmail, { env }).`);
+  }
+
   // A deployed component only receives the variables its contract declares, so an override
   // naming anything else would resolve to nothing. Fail with the mapping that does work.
   if (!isDeclaredEnvVar(override)) {
@@ -220,6 +229,15 @@ function envNameFor(kind: string, values: Record<string, unknown>, key: string, 
         `one of them (default ${fallback}). To use a different secret, map it onto ${fallback} ` +
         `in app.use(convexEmail, { env }).`,
     );
+  }
+
+  for (const [ownerKind, fields] of Object.entries(CONVEX_EMAIL_ADAPTERS)) {
+    for (const [ownerKey, field] of Object.entries(fields as ConvexAdapterFields)) {
+      if (field.env === override && field.restrictEnvToField &&
+        (kind !== ownerKind || key !== ownerKey)) {
+        throw new Error(`Convex environment variable ${override} is restricted to ${ownerKind}.${ownerKey}.`);
+      }
+    }
   }
 
   return override;

@@ -7,6 +7,7 @@ import { cloudflare } from "./cloudflare.js";
 import { createEmailClient } from "./core.js";
 import { EmailSdkError } from "./errors.js";
 import { runDoctor } from "./doctor.js";
+import { graph } from "./graph.js";
 import { iterable } from "./iterable.js";
 import { jetemail } from "./jetemail.js";
 import { lettermint } from "./lettermint.js";
@@ -55,6 +56,11 @@ const providerDocs = [
     name: "cloudflare",
     env: ["CLOUDFLARE_API_TOKEN", "CLOUDFLARE_ACCOUNT_ID"],
     note: "Cloudflare Email Sending REST API",
+  },
+  {
+    name: "graph",
+    env: ["MS_GRAPH_TENANT_ID", "MS_GRAPH_CLIENT_ID", "MS_GRAPH_CLIENT_SECRET", "MS_GRAPH_USER"],
+    note: "Microsoft Graph sendMail API",
   },
   { name: "unosend", env: ["UNOSEND_API_KEY"], note: "Unosend REST API" },
   {
@@ -113,6 +119,17 @@ const factories = {
       apiToken: flagOrEnv(flags, "api-token", "CLOUDFLARE_API_TOKEN"),
       accountId: flagOrEnv(flags, "account-id", "CLOUDFLARE_ACCOUNT_ID"),
       baseUrl: stringFlag(flags, "base-url") ?? process.env.CLOUDFLARE_BASE_URL,
+    }),
+  graph: (flags) =>
+    graph({
+      tenantId: flagOrEnv(flags, "tenant-id", "MS_GRAPH_TENANT_ID"),
+      clientId: flagOrEnv(flags, "client-id", "MS_GRAPH_CLIENT_ID"),
+      clientSecret: flagOrEnv(flags, "client-secret", "MS_GRAPH_CLIENT_SECRET"),
+      user: flagOrEnv(flags, "user", "MS_GRAPH_USER"),
+      baseUrl: stringFlag(flags, "base-url") ?? process.env.MS_GRAPH_BASE_URL,
+      tokenUrl: stringFlag(flags, "token-url") ?? process.env.MS_GRAPH_TOKEN_URL,
+      scope: stringFlag(flags, "scope") ?? process.env.MS_GRAPH_SCOPE,
+      saveToSentItems: booleanFlag(flags, "save-to-sent-items") ?? booleanEnv("MS_GRAPH_SAVE_TO_SENT_ITEMS"),
     }),
   unosend: (flags) =>
     unosend({
@@ -214,6 +231,12 @@ const envFlagNames: Record<string, string> = {
   SENDGRID_API_KEY: "api-key",
   CLOUDFLARE_API_TOKEN: "api-token",
   CLOUDFLARE_ACCOUNT_ID: "account-id",
+  MS_GRAPH_TENANT_ID: "tenant-id",
+  MS_GRAPH_CLIENT_ID: "client-id",
+  MS_GRAPH_CLIENT_SECRET: "client-secret",
+  MS_GRAPH_USER: "user",
+  MS_GRAPH_TOKEN_URL: "token-url",
+  MS_GRAPH_SCOPE: "scope",
   UNOSEND_API_KEY: "api-key",
   ITERABLE_API_KEY: "api-key",
   ITERABLE_CAMPAIGN_ID: "campaign-id",
@@ -358,7 +381,7 @@ async function doctor(flags: CliFlags) {
   const missing = provider?.env.filter((name) => !hasEnvOrFlag(flags, name)) ?? [];
   const live = truthyFlag(flags, "live");
   const from = flags.from === undefined ? undefined : (stringFlag(flags, "from") ?? "");
-  const credentialEnv = provider?.env[0];
+  const credentialEnv = provider?.name === "graph" ? "MS_GRAPH_CLIENT_SECRET" : provider?.env[0];
   const credentialFlag = credentialEnv ? envFlagNames[credentialEnv] : undefined;
   const result = await runDoctor({
     adapter: provider?.name ?? "unknown",
@@ -377,6 +400,10 @@ async function doctor(flags: CliFlags) {
         : provider
           ? process.env[`${provider.name.toUpperCase()}_BASE_URL`]
           : undefined,
+    tenantId: provider?.name === "graph" ? stringFlag(flags, "tenant-id") ?? process.env.MS_GRAPH_TENANT_ID : undefined,
+    clientId: provider?.name === "graph" ? stringFlag(flags, "client-id") ?? process.env.MS_GRAPH_CLIENT_ID : undefined,
+    tokenUrl: provider?.name === "graph" ? stringFlag(flags, "token-url") ?? process.env.MS_GRAPH_TOKEN_URL : undefined,
+    scope: provider?.name === "graph" ? stringFlag(flags, "scope") ?? process.env.MS_GRAPH_SCOPE : undefined,
   });
   if (!provider)
     result.checks.configuration.message =
@@ -686,6 +713,8 @@ Doctor options:
   --api-key <key>              Overrides the selected adapter's API key environment.
   --api-token <token>          Overrides token environment (including Lettermint).
   --base-url <url>             Test-only: fixed provider base or 127.0.0.1/[::1] fixture URL.
+  --token-url <url>            Graph OAuth token endpoint (or MS_GRAPH_TOKEN_URL).
+  --scope <scope>              Graph OAuth scope (or MS_GRAPH_SCOPE).
   Default checks configuration only and makes no provider request.
   Authentication is not delivery proof. The CLI does not load .env files.
   Exit status: 0 when every requested check passes, 1 otherwise.

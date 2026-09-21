@@ -165,6 +165,46 @@ describe("adapter option resolution", () => {
     });
   });
 
+  test("Graph endpoints and scope can only come from server environment", () => {
+    setRegistryEnv();
+    process.env.MS_GRAPH_BASE_URL = "https://graph.microsoft.us/v1.0";
+    process.env.MS_GRAPH_TOKEN_URL = "https://login.microsoftonline.us/tenant/oauth2/v2.0/token";
+    process.env.MS_GRAPH_SCOPE = "https://graph.microsoft.us/.default";
+
+    const options = resolveAdapterOptions({
+      kind: "graph",
+      baseUrl: "https://attacker.invalid",
+      tokenUrl: "https://attacker.invalid/token",
+      scope: "untrusted",
+    } as unknown as ConvexEmailAdapterConfig);
+    expect(options.baseUrl).toBe(process.env.MS_GRAPH_BASE_URL);
+    expect(options.tokenUrl).toBe(process.env.MS_GRAPH_TOKEN_URL);
+    expect(options.scope).toBe(process.env.MS_GRAPH_SCOPE);
+    for (const key of ["baseUrl", "tokenUrl", "scope"] as const) {
+      expect("inline" in CONVEX_EMAIL_ADAPTERS.graph[key]).toBe(false);
+    }
+  });
+
+  test("Graph secrets cannot be read through another adapter or a URL field", () => {
+    setRegistryEnv();
+    for (const config of [
+      { kind: "resend", apiKeyEnv: "MS_GRAPH_CLIENT_SECRET", baseUrl: "https://attacker.invalid" },
+      { kind: "smtp", passEnv: "MS_GRAPH_CLIENT_SECRET", host: "attacker.invalid" },
+    ] as ConvexEmailAdapterConfig[]) {
+      expect(() => resolveAdapterOptions(config)).toThrow("restricted to graph.clientSecret");
+      expect(() => resolveAdapterOptions(config)).not.toThrow(process.env.MS_GRAPH_CLIENT_SECRET!);
+    }
+    for (const field of ["baseUrlEnv", "tokenUrlEnv", "userEnv", "scopeEnv", "tenantIdEnv", "clientIdEnv"]) {
+      for (const source of ["MS_GRAPH_CLIENT_SECRET", "RESEND_API_KEY"]) {
+        const config = { kind: "graph", [field]: source } as ConvexEmailAdapterConfig;
+        expect(() => resolveAdapterOptions(config)).toThrow(`Graph ${field} must use`);
+        expect(() => resolveAdapterOptions(config)).not.toThrow(process.env[source]!);
+      }
+    }
+    expect(resolveAdapterOptions({ kind: "graph", clientSecretEnv: "MS_GRAPH_CLIENT_SECRET" })
+      .clientSecret).toBe(process.env.MS_GRAPH_CLIENT_SECRET);
+  });
+
   test("omits optional fields that neither config nor environment supplies", () => {
     process.env.LETTERMINT_API_TOKEN = "lm_live_123";
 
@@ -228,6 +268,23 @@ describe("adapter config wire format", () => {
       { kind: "jetemail", apiKeyEnv: "PLUNK_API_KEY" },
       { kind: "primitive", baseUrl: "https://primitive.example.test" },
     ]);
+  });
+
+  test("rejects attacker-controlled Graph endpoints in owned sends and batches", async () => {
+    const t = convexTest(schema, modules);
+    for (const field of ["baseUrl", "tokenUrl", "scope"]) {
+      const email = {
+        ...message,
+        adapters: [{ kind: "graph", [field]: "https://attacker.invalid" } as ConvexEmailAdapterConfig],
+        adapter: "graph",
+      };
+      await expect(t.mutation(api.lib.enqueueOwned, {
+        email, ownerId: "authenticated-user",
+      })).rejects.toThrow("Validator error");
+      await expect(t.mutation(api.lib.enqueueOwnedBatch, {
+        messages: [email], ownerId: "authenticated-user",
+      })).rejects.toThrow("Validator error");
+    }
   });
 
   test("rejects an inline credential", async () => {

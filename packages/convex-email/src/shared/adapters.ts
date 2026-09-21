@@ -22,6 +22,8 @@ export type ConvexAdapterField = {
    * config key that overrides which variable is read.
    */
   readonly env?: string;
+  /** Prevent other fields from reading this environment variable through an override. */
+  readonly restrictEnvToField?: boolean;
   /**
    * Whether the literal value may be written into adapter config. Credentials are never
    * inline: they are read from the component's environment so config stays storable.
@@ -143,6 +145,19 @@ export const CONVEX_EMAIL_ADAPTERS = {
     secure: { type: "boolean", env: "SMTP_SECURE", inline: true },
     user: { type: "string", env: "SMTP_USER" },
     pass: { type: "string", env: "SMTP_PASS" },
+  },
+  graph: {
+    tenantId: { type: "string", env: "MS_GRAPH_TENANT_ID", required: true },
+    clientId: { type: "string", env: "MS_GRAPH_CLIENT_ID", required: true },
+    clientSecret: {
+      type: "string", env: "MS_GRAPH_CLIENT_SECRET", required: true, restrictEnvToField: true,
+    },
+    user: { type: "string", env: "MS_GRAPH_USER", inline: true, required: true },
+    saveToSentItems: { type: "boolean", env: "MS_GRAPH_SAVE_TO_SENT_ITEMS", inline: true },
+    // Public send requests must not choose where server-acquired tokens are sent.
+    baseUrl: { type: "string", env: "MS_GRAPH_BASE_URL" },
+    tokenUrl: { type: "string", env: "MS_GRAPH_TOKEN_URL" },
+    scope: { type: "string", env: "MS_GRAPH_SCOPE" },
   },
   sparkpost: {
     apiKey: { type: "string", env: "SPARKPOST_API_KEY", required: true },

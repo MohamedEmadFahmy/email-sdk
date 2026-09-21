@@ -18,14 +18,14 @@ const run = (body: unknown, extra: Partial<DoctorOptions> = {}) =>
   runDoctor({ ...options, fetch: async () => json(body), ...extra });
 
 describe("shared live gate wiring", () => {
-  const all = ["jetemail", "lettermint", "lettr", "primitive", "resend", "sequenzy"];
+  const all = ["graph", "jetemail", "lettermint", "lettr", "primitive", "resend", "sequenzy"];
   test.each([
     "packages/email-sdk/src/doctor.ts",
     "packages/email-sdk/src/doctor.test.ts",
     "packages/email-sdk/src/cli.ts",
     "scripts/changed-live-adapters.ts",
     "scripts/run-live-adapters.ts",
-  ])("shared change %s selects all six checks", (file) => {
+  ])("shared change %s selects all seven checks", (file) => {
     expect(selectLiveAdapters([file])).toEqual(all);
   });
   test("individual adapters select only their checks", () => {
@@ -66,6 +66,68 @@ describe("shared live gate wiring", () => {
     for (const name of all) expect(safe[`${name.toUpperCase()}_LIVE_SEND`]).toBe("false");
     expect(safe.RESEND_API_KEY).toBe("private-key");
     expect(env.RESEND_LIVE_SEND).toBe("true");
+  });
+});
+
+describe("Graph live probe", () => {
+  test("checks client credentials without sending mail and honors national-cloud options", async () => {
+    const requests: Array<{ url: string; body: string }> = [];
+    const result = await runDoctor({
+      adapter: "graph",
+      configured: true,
+      live: true,
+      credential: "private-client-secret",
+      tenantId: "private-tenant",
+      clientId: "private-client",
+      tokenUrl: "http://127.0.0.1/token",
+      scope: "https://graph.microsoft.us/.default",
+      fetch: async (url, init) => {
+        requests.push({ url, body: String(init.body) });
+        return json({ access_token: "private-token" });
+      },
+    });
+    expect(result.checks.authentication.status).toBe("passed");
+    expect(result.checks.sender.status).toBe("not_requested");
+    expect(requests).toEqual([
+      {
+        url: "http://127.0.0.1/token",
+        body: "client_id=private-client&client_secret=private-client-secret&scope=https%3A%2F%2Fgraph.microsoft.us%2F.default&grant_type=client_credentials",
+      },
+    ]);
+  });
+
+  test("times out a Graph token request that ignores its abort signal", async () => {
+    const result = await runDoctor({
+      adapter: "graph",
+      configured: true,
+      live: true,
+      credential: "private-client-secret",
+      tenantId: "private-tenant",
+      clientId: "private-client",
+      tokenUrl: "http://127.0.0.1/token",
+      timeoutMs: 5,
+      fetch: async () => new Promise<Response>(() => {}),
+    });
+    expect(result.checks.authentication.status).toBe("timeout");
+  });
+
+  test("bounds an oversized Graph token response", async () => {
+    const result = await runDoctor({
+      adapter: "graph",
+      configured: true,
+      live: true,
+      credential: "private-client-secret",
+      tenantId: "private-tenant",
+      clientId: "private-client",
+      tokenUrl: "http://127.0.0.1/token",
+      fetch: async () =>
+        new Response(JSON.stringify({ access_token: "x".repeat(1_100_000) }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+    });
+    expect(result.checks.authentication.status).toBe("inconclusive");
+    expect(result.ok).toBe(false);
   });
 });
 
